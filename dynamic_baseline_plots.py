@@ -25,14 +25,14 @@ def _calculate_baselines_for_sensors(
         strategy_params_freq = {}
 
     # Calculate baseline for value
-    value_baseline_df = calculate_dynamic_baseline(
-        df_preprocessed, param_col_name="value", strategy_params=strategy_params_value
-    )
+    value_baseline_df = calculate_dynamic_baseline(df_preprocessed,
+                                                    param_col_name="value",
+                                                    strategy_params=strategy_params_value)
 
     # Calculate baseline for freq
-    freq_baseline_df = calculate_dynamic_baseline(
-        df_preprocessed, param_col_name="freq", strategy_params=strategy_params_freq
-    )
+    freq_baseline_df = calculate_dynamic_baseline(df_preprocessed,
+                                                    param_col_name="freq",
+                                                    strategy_params=strategy_params_freq)
 
     merged = df_preprocessed.copy()
     merged["baseline_value"] = value_baseline_df["final_baseline"]
@@ -60,33 +60,36 @@ def plot_raw_and_dynamic_baseline(
     """
     # 1) Load and merge all CSVs
     df_raw = process_and_merge_csv_files(directory)
-    
-    print("strategy_params_value: ", strategy_params_value)
-    print("strategy_params_freq: ", strategy_params_freq)
 
-    # 3) Calculate dynamic baselines for both sensors on preprocessed data
-    df_with_baselines = _calculate_baselines_for_sensors(
-        df_raw,
-        strategy_params_value=strategy_params_value,
-        strategy_params_freq=strategy_params_freq,
-    )
+    print("Raw data is loaded")
 
      # 2) Preprocess (filter by reaper lift and speed)
     df_preprocessed = preprocess_data(
-        df_with_baselines,
+        df_raw,
         reaper_lift_threshold=reaper_lift_threshold,
         speed_threshold=speed_threshold,
     )
 
-    print(df_raw.shape)
-    print(df_with_baselines.shape)
-    print(df_preprocessed.shape)
+    print("Data is pre-processed by the speed in range "
+        f"[0; {speed_threshold}] and reaper-lift > {reaper_lift_threshold}")
 
-    # 4) Create figure with two subplots (matching style of provided image)
+    # 3) Calculate dynamic baselines for both sensors on preprocessed data
+    df_with_baselines = _calculate_baselines_for_sensors(
+        df_preprocessed,
+        strategy_params_value=strategy_params_value,
+        strategy_params_freq=strategy_params_freq,
+    )
+
+    print(df_raw.shape)
+    print(df_preprocessed.shape)
+    print(df_with_baselines.shape)
+
+    # 4) Create figure with three subplots (raw, baselines, speed)
+    speed_thr = speed_threshold if speed_threshold is not None else 1.0
     fig, axes = plt.subplots(
-        2,
+        3,
         1,
-        figsize=(14, 8),
+        figsize=(14, 10),
         sharex=True,
         constrained_layout=True,
     )
@@ -118,17 +121,17 @@ def plot_raw_and_dynamic_baseline(
     )
 
     ax_mid.plot(
-        df_preprocessed["time"],
-        df_preprocessed["baseline_value_smoothed"],
-        color="tab:blue",
+        df_with_baselines["time"],
+        df_with_baselines["baseline_value_smoothed"],
+        color="tab:purple",
         linewidth=1.5,
         linestyle="--",
         label="Dynamic Baseline Value",
     )
     ax_mid.plot(
-        df_preprocessed["time"],
-        df_preprocessed["baseline_freq_smoothed"],
-        color="tab:orange",
+        df_with_baselines["time"],
+        df_with_baselines["baseline_freq_smoothed"],
+        color="tab:red",
         linewidth=1.5,
         linestyle="--",
         label="Dynamic Baseline Freq",
@@ -138,6 +141,27 @@ def plot_raw_and_dynamic_baseline(
     ax_mid.set_ylabel("Sensor Values")
     ax_mid.grid(True, alpha=0.3)
     ax_mid.legend(loc="upper right")
+
+    # --- Third plot: Speed with threshold ---
+    ax_bottom = axes[2]
+    ax_bottom.plot(
+        df_raw["time"],
+        df_raw["speed"],
+        color="tab:green",
+        label="Speed",
+    )
+    if speed_thr is not None:
+        ax_bottom.axhline(
+            speed_thr,
+            color="red",
+            linestyle="--",
+            linewidth=1.2,
+            label=f"Speed threshold ({speed_thr})",
+        )
+    ax_bottom.set_title("3. Speed with Threshold")
+    ax_bottom.set_ylabel("Speed")
+    ax_bottom.grid(True, alpha=0.3)
+    ax_bottom.legend(loc="upper right")
 
     axes[-1].set_xlabel("Time")
 
@@ -149,28 +173,33 @@ def plot_raw_and_dynamic_baseline(
 
 if __name__ == "__main__":
     # 3431363532335116004a0032
+    # 3431363532335116004d0035  # big dataset
+    # 343136353233511600220035
     dir_path = "data/343136353233511600220035"
     plot_raw_and_dynamic_baseline(dir_path,
+                                    speed_threshold=7.0,
                                     strategy_params_value = {
                                         "min_diff": 100,
-                                        "min_window1": 200,
-                                        "min_window2": 500,
-                                        "threshold_q_mins": 0.05,
+                                        "min_window1": 300,
+                                        "min_window2": 600,
+                                        "threshold_q_mins": 0.1,
                                         "final_smoothing_window": 5,
-                                        "const_window": 100,
-                                        "const_std_thresh": 5,
-                                        "rolling_std_small": 5,    # Adjust based on sensor noise
-                                        "rolling_window": 10},
+                                        "const_window": 300,
+                                        "const_std_thresh": 20,
+                                        "rolling_std_small": 20,    # Adjust based on sensor noise
+                                        "rolling_window": 400,
+                                        "min_low_points": 5},
                                     strategy_params_freq = {
                                         "min_diff": 100,
-                                        "min_window1": 200,
-                                        "min_window2": 500,
-                                        "threshold_q_mins": 0.05,
+                                        "min_window1": 300,
+                                        "min_window2": 600,
+                                        "threshold_q_mins": 0.1,
                                         "final_smoothing_window": 5,
-                                        "const_window": 100,
-                                        "const_std_thresh": 5,
-                                        "rolling_std_small": 5,
-                                        "rolling_window": 10},
+                                        "const_window": 300,
+                                        "const_std_thresh": 20,
+                                        "rolling_std_small": 20,
+                                        "rolling_window": 400,
+                                        "min_low_points": 5},
                                     output_path="result.png")
 
 

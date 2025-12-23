@@ -8,10 +8,6 @@ import pandas as pd
 def process_and_merge_csv_files(directory: str) -> pd.DataFrame:
     """
     Read all CSV files from a directory and merge them into a single DataFrame.
-
-    This mirrors the behaviour of `process_and_merge_csv_files` from
-    `baseline_calculation.py`, but is kept local so this module can be used
-    independently.
     """
     csv_files = [f for f in os.listdir(directory) if f.endswith(".csv")]
     df_list = []
@@ -61,9 +57,6 @@ def preprocess_data(
 ) -> pd.DataFrame:
     """
     Filter and preprocess data based on reaper lift percentage and speed.
-
-    This follows the same logic as `PotatoHarvestBaselinePredictor.preprocess_data`
-    from `baseline_calculation.py`, but implemented as a standalone function.
     """
     if reaper_lift_threshold is None:
         # Reasonable defaults if not provided
@@ -76,8 +69,11 @@ def preprocess_data(
     if speed_column not in df.columns:
         raise KeyError(f"Column '{speed_column}' not found in DataFrame.")
 
-    mask = (df[reaper_lift_column] > reaper_lift_threshold) & (
-        df[speed_column] > speed_threshold
+    # Filter by lift/speed thresholds and drop negative speed readings
+    mask = (
+        (df[reaper_lift_column] > reaper_lift_threshold)
+        & (df[speed_column] >= 0)
+        & (df[speed_column] <= speed_threshold)
     )
     df_filtered = df.loc[mask].copy()
 
@@ -94,7 +90,6 @@ def calculate_dynamic_baseline(
 ) -> pd.DataFrame:
     """
     Calculate dynamic baseline using a local minimum search approach.
-    Replaces the previous smoothing-based logic.
 
     Parameters
     ----------
@@ -165,70 +160,84 @@ def calculate_dynamic_baseline(
 
     # === 3. Auxiliary function for finding minima ===
     def _find_minimum_in_window(window_data: np.ndarray) -> Optional[float]:
-        """Находит минимальное значение в окне с учетом условий"""
-        if len(window_data) == 0:
+        """Find a robust local minimum while ignoring extreme negative spikes."""
+        max_drop_factor = 3.0
+
+        if len(window_data) < 5:
             return None
-        
-        max_val = np.max(window_data)
-        min_val = np.min(window_data)
-        
-        # Checking if there is enough variation
-        if (max_val - min_val) <= min_diff:
-            return None
-        
-        # Looking for low points
-        low_points = window_data[window_data < (max_val - min_diff)]
-        
-        # Several low points are needed
-        if len(low_points) < min_low_points:
-            return None
-        
-        # Take the lowest values
-        threshold_val = np.quantile(low_points, threshold_q_mins)
-        selected_lows = low_points[low_points <= threshold_val]
-        
-        return float(np.mean(selected_lows)) if len(selected_lows) > 0 else None
+
+        max_value = np.max(window_data)
+        min_value = np.min(window_data)
+
+        if (max_value - min_value) > min_diff:
+            # Usual low-point logic
+            all_mins = [v for v in window_data if v < max_value - min_diff]
+
+            if len(all_mins) < min_low_points:
+                return None
+
+            # Filter out extreme negative spikes
+            # 1) Typical level via median (robust to outliers)
+            median_val = float(np.median(window_data))
+            # 2) Typical spread via MAD
+            deviations = np.abs(window_data - median_val)
+            mad = float(np.median(deviations))
+            # 3) Ignore points that are too low (negative spikes)
+            spike_threshold = median_val - max_drop_factor * 1.4826 * mad
+
+            filtered_mins = [v for v in all_mins if v > spike_threshold]
+
+            # If after filtering we have too few points, treat as spike noise
+            if len(filtered_mins) < max(2, min_low_points // 2):
+                return None
+
+            # Use filtered points to derive the minimum estimate
+            threshold_mins = np.quantile(filtered_mins, threshold_q_mins)
+            kept = [v for v in filtered_mins if v <= threshold_mins]
+
+            return float(np.mean(kept)) if kept else None
+
+        return None
 
     # === 4. Main loop with optimizations ===
-    min_values = np.full(n, np.nan, dtype=float)
-    
+    # Simple optimization: vectorize constant/plateau handling before looping
+    min_values = np.full(n, np.nan, dtype=np.float64)
+
+    # Vectorized assignment for constant regions
+    constant_mask = is_constant.astype(bool)
+    min_values[constant_mask] = data_values[constant_mask]
+
+    # Vectorized assignment for local plateaus
+    plateau_mask = local_stds < rolling_std_small
+    min_values[plateau_mask] = data_values[plateau_mask]
+
     # Pre-calculate the boundaries
     window1_half = min_window1 // 2
     window2_half = min_window2 // 2
-    
+
     # Set boundaries where analysis is impossible
     start_idx = max(window1_half, window2_half)
     end_idx = n - start_idx
-    
-    for i in range(n):
-        # 1. Constant regions - use the actual value
-        if is_constant[i]:
-            min_values[i] = data_values[i]
+
+    # Only iterate where we still need values and have full windows
+    for i in range(start_idx, end_idx):
+        if constant_mask[i] or plateau_mask[i]:
             continue
-        
-        # 2. Local plateaus - use the actual value
-        if local_stds[i] < rolling_std_small:
-            min_values[i] = data_values[i]
-            continue
-        
-        # 3. Skip points at the boundaries where the windows are incomplete
-        if i < start_idx or i >= end_idx:
-            continue
-        
-        # 4. Check window 1
+
+        # Check window 1
         start1 = i - window1_half
         end1 = i + window1_half + 1
         min_val1 = _find_minimum_in_window(data_values[start1:end1])
-        
+
         if min_val1 is not None:
             min_values[i] = min_val1
             continue
-        
-        # 5. Check window 2 (if window 1 did not produce a result)
+
+        # Check window 2 (if window 1 did not produce a result)
         start2 = i - window2_half
         end2 = i + window2_half + 1
         min_val2 = _find_minimum_in_window(data_values[start2:end2])
-        
+
         if min_val2 is not None:
             min_values[i] = min_val2
     
@@ -261,7 +270,7 @@ def calculate_dynamic_baseline(
         "time": df["time"],
         param_col_name: data_values,
         "final_baseline": final_baseline.values,
-        "super_smoothed": final_baseline.values  # Одна копия вместо двух
+        "super_smoothed": final_baseline.values
     }
     
     # Add auxiliary columns
@@ -306,5 +315,3 @@ def load_preprocess_and_calculate_baseline(
     )
 
     return baseline_df
-
-
