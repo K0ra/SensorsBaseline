@@ -1,4 +1,5 @@
 from typing import Dict, Any, Optional
+import os
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -171,35 +172,62 @@ def plot_raw_and_dynamic_baseline(
         plt.show()
 
 
-if __name__ == "__main__":
-    # 3431363532335116004a0032
-    # 3431363532335116004d0035  # big dataset
-    # 343136353233511600220035
-    dir_path = "data/343136353233511600220035"
-    plot_raw_and_dynamic_baseline(dir_path,
-                                    speed_threshold=7.0,
-                                    strategy_params_value = {
-                                        "min_diff": 100,
-                                        "min_window1": 300,
-                                        "min_window2": 600,
-                                        "threshold_q_mins": 0.1,
-                                        "final_smoothing_window": 5,
-                                        "const_window": 300,
-                                        "const_std_thresh": 20,
-                                        "rolling_std_small": 20,    # Adjust based on sensor noise
-                                        "rolling_window": 400,
-                                        "min_low_points": 5},
-                                    strategy_params_freq = {
-                                        "min_diff": 100,
-                                        "min_window1": 300,
-                                        "min_window2": 600,
-                                        "threshold_q_mins": 0.1,
-                                        "final_smoothing_window": 5,
-                                        "const_window": 300,
-                                        "const_std_thresh": 20,
-                                        "rolling_std_small": 20,
-                                        "rolling_window": 400,
-                                        "min_low_points": 5},
-                                    output_path="result.png")
+def plot_folder_to_file(
+    base_data_dir: str,
+    folder_name: str,
+    reaper_lift_threshold: Optional[float] = None,
+    speed_threshold: Optional[float] = None,
+    strategy_params_value: Optional[Dict[str, Any]] = None,
+    strategy_params_freq: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Convenience wrapper: plot one folder under `base_data_dir` and save
+    the figure to `<folder_name>.png` in the project root (or caller's cwd).
+    """
+    folder_path = os.path.join(base_data_dir, folder_name)
+    output_filename = f"results/{folder_name}.png"
 
+    print(f"Processing folder: {folder_path}")
+    plot_raw_and_dynamic_baseline(
+        folder_path,
+        reaper_lift_threshold=reaper_lift_threshold,
+        speed_threshold=speed_threshold,
+        strategy_params_value=strategy_params_value,
+        strategy_params_freq=strategy_params_freq,
+        output_path=output_filename,
+    )
+    print(f"Saved figure: {output_filename}")
+
+
+if __name__ == "__main__":
+    data_root = "data"
+
+    # Common baseline parameters for all folders
+    common_params_value = {
+        "min_diff": 100,
+        "min_window1": 300,
+        "min_window2": 600,
+        "threshold_q_mins": 0.1,
+        "final_smoothing_window": 5,
+        "const_window": 300,
+        "const_std_thresh": 20,
+        "rolling_std_small": 20,  # Adjust based on sensor noise
+        "rolling_window": 400,
+        "min_low_points": 5,
+    }
+    common_params_freq = common_params_value.copy()
+
+    # Process each subfolder under `data`
+    for name in os.listdir(data_root):
+        folder_path = os.path.join(data_root, name)
+        if not os.path.isdir(folder_path):
+            continue
+
+        plot_folder_to_file(
+            base_data_dir=data_root,
+            folder_name=name,
+            speed_threshold=7.0,
+            strategy_params_value=common_params_value,
+            strategy_params_freq=common_params_freq,
+        )
 
