@@ -29,12 +29,14 @@ def _calculate_baselines_for_sensors(
     # Calculate baseline for value
     value_baseline_df = calculate_dynamic_baseline_downsample(df_preprocessed,
                                                     param_col_name="value",
-                                                    strategy_params=strategy_params_value)
+                                                    strategy_params=strategy_params_value,
+                                                    downsample_factor=2)
 
     # Calculate baseline for freq
     freq_baseline_df = calculate_dynamic_baseline_downsample(df_preprocessed,
                                                     param_col_name="freq",
-                                                    strategy_params=strategy_params_freq)
+                                                    strategy_params=strategy_params_freq,
+                                                    downsample_factor=2)
 
     merged = df_preprocessed.copy()
     merged["baseline_value"] = value_baseline_df["final_baseline"]
@@ -60,6 +62,7 @@ def plot_raw_and_dynamic_baseline(
     1. Raw sensor data (value & freq).
     2. After preprocessing with dynamic baselines overlaid.
     """
+    start = time.time()
     # 1) Load and merge all CSVs
     df_raw = process_and_merge_csv_files(directory)
 
@@ -81,6 +84,7 @@ def plot_raw_and_dynamic_baseline(
         strategy_params_value=strategy_params_value,
         strategy_params_freq=strategy_params_freq,
     )
+    print(f"Algorithm time: {time.time() - start}")
 
     print(df_raw.shape)
     print(df_preprocessed.shape)
@@ -186,7 +190,7 @@ def plot_folder_to_file(
     the figure to `<folder_name>.png` in the project root (or caller's cwd).
     """
     folder_path = os.path.join(base_data_dir, folder_name)
-    output_filename = f"results/{folder_name}.png"
+    # output_filename = f"results/{folder_name}.png"
 
     print(f"Processing folder: {folder_path}")
     plot_raw_and_dynamic_baseline(
@@ -195,9 +199,9 @@ def plot_folder_to_file(
         speed_threshold=speed_threshold,
         strategy_params_value=strategy_params_value,
         strategy_params_freq=strategy_params_freq,
-        output_path=output_filename,
+        # output_path=output_filename,
     )
-    print(f"Saved figure: {output_filename}")
+    # print(f"Saved figure: {output_filename}")
 
 
 if __name__ == "__main__":
@@ -218,17 +222,20 @@ if __name__ == "__main__":
     }
     common_params_freq = common_params_value.copy()
 
-    start_time = time.time()
+    # start_time = time.time()
+
+    # 343136353233511600220035
+    # 3431363532335116004a0032b
 
     plot_folder_to_file(
             base_data_dir=data_root,
-            folder_name="3431363532335116004a0032b",
+            folder_name="343136353233511600220035",
             speed_threshold=7.0,
             strategy_params_value=common_params_value,
             strategy_params_freq=common_params_freq,
         )
 
-    print(f"Total time: {time.time() - start_time}")
+    # print(f"Total time: {time.time() - start_time}")
 
     # Process each subfolder under `data`
     # for name in os.listdir(data_root):
