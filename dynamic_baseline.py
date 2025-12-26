@@ -159,45 +159,46 @@ def calculate_dynamic_baseline(
     final_smoothing_window = int(strategy_params.get("final_smoothing_window", 1))
 
     # === 3. Auxiliary function for finding minima ===
-    def _find_minimum_in_window(window_data: np.ndarray) -> Optional[float]:
-        """Find a robust local minimum while ignoring extreme negative spikes."""
+    def _find_minimum_in_window(window_data: np.ndarray) -> float:
+        """
+        Vectorized version - processes whole arrays at once.
+        Returns np.nan if no valid minimum is found.
+        """
         max_drop_factor = 3.0
 
         if len(window_data) < 5:
-            return None
+            return np.nan
 
         max_value = np.max(window_data)
         min_value = np.min(window_data)
 
         if (max_value - min_value) > min_diff:
-            # Usual low-point logic
-            all_mins = [v for v in window_data if v < max_value - min_diff]
+            # Vectorized search of low points
+            low_mask = window_data < (max_value - min_diff)
+            low_points = window_data[low_mask]
 
-            if len(all_mins) < min_low_points:
-                return None
+            if len(low_points) < min_low_points:
+                return np.nan
 
-            # Filter out extreme negative spikes
-            # 1) Typical level via median (robust to outliers)
-            median_val = float(np.median(window_data))
-            # 2) Typical spread via MAD
+            # Vectorized filtering of peaks
+            median_val = np.median(window_data)
             deviations = np.abs(window_data - median_val)
-            mad = float(np.median(deviations))
-            # 3) Ignore points that are too low (negative spikes)
+            mad = np.median(deviations)
             spike_threshold = median_val - max_drop_factor * 1.4826 * mad
 
-            filtered_mins = [v for v in all_mins if v > spike_threshold]
+            # Filtering by an array
+            filtered = low_points[low_points > spike_threshold]
 
-            # If after filtering we have too few points, treat as spike noise
-            if len(filtered_mins) < max(2, min_low_points // 2):
-                return None
+            if len(filtered) < max(2, min_low_points // 2):
+                return np.nan
 
-            # Use filtered points to derive the minimum estimate
-            threshold_mins = np.quantile(filtered_mins, threshold_q_mins)
-            kept = [v for v in filtered_mins if v <= threshold_mins]
+            # Vectorized quantile calculation
+            threshold_val = np.percentile(filtered, threshold_q_mins * 100)
+            kept = filtered[filtered <= threshold_val]
 
-            return float(np.mean(kept)) if kept else None
+            return np.mean(kept) if len(kept) > 0 else np.nan
 
-        return None
+        return np.nan
 
     # === 4. Main loop with optimizations ===
     # Simple optimization: vectorize constant/plateau handling before looping
@@ -229,7 +230,7 @@ def calculate_dynamic_baseline(
         end1 = i + window1_half + 1
         min_val1 = _find_minimum_in_window(data_values[start1:end1])
 
-        if min_val1 is not None:
+        if not np.isnan(min_val1):
             min_values[i] = min_val1
             continue
 
@@ -238,7 +239,7 @@ def calculate_dynamic_baseline(
         end2 = i + window2_half + 1
         min_val2 = _find_minimum_in_window(data_values[start2:end2])
 
-        if min_val2 is not None:
+        if not np.isnan(min_val2):
             min_values[i] = min_val2
     
     # === 5. Filling in the blanks (simplified approach) ===
@@ -279,6 +280,83 @@ def calculate_dynamic_baseline(
             result_cols[col] = df[col]
     
     return pd.DataFrame(result_cols)
+
+
+def calculate_dynamic_baseline_downsample(
+    df_input: pd.DataFrame,
+    param_col_name: str,
+    strategy_params: Optional[Dict[str, Any]] = None,
+    downsample_factor: int = 10,
+) -> pd.DataFrame:
+    """
+    For acceleration, process less data by downsampling.
+    Example: 825k -> 82.5k rows (10x faster).
+    
+    Parameters
+    ----------
+    df_input:
+        Input DataFrame that must contain a `time` column and the column specified
+        by `param_col_name`.
+    param_col_name:
+        Name of the sensor column to use for baseline calculation (e.g. 'value'
+        or 'freq').
+    strategy_params:
+        Dictionary with algorithm parameters (same as calculate_dynamic_baseline).
+    downsample_factor:
+        Factor by which to downsample the data before processing. Default is 10.
+        Set to 1 to disable downsampling.
+    
+    Returns
+    -------
+    DataFrame with the same structure as calculate_dynamic_baseline, but with
+    baseline values interpolated back to the original data points.
+    """
+    strategy_params = strategy_params or {}
+    
+    # 1. Data downsampling
+    if downsample_factor > 1:
+        df_sampled = df_input.iloc[::downsample_factor].copy()
+        print(f"📉 Downsampled from {len(df_input)} to {len(df_sampled)} rows")
+    else:
+        df_sampled = df_input.copy()
+    
+    # 2. Use original algorithm on the downsampled data
+    df_baseline = calculate_dynamic_baseline(df_sampled, param_col_name, strategy_params)
+    
+    # 3. Interpolate back to all points
+    if downsample_factor > 1:
+        # Create indices for interpolation
+        n_original = len(df_input)
+        n_sampled = len(df_baseline)
+        
+        # Original indices (every downsample_factor-th point)
+        sampled_indices = np.arange(0, n_original, downsample_factor)[:n_sampled]
+        # Target indices (all original points)
+        target_indices = np.arange(n_original)
+        
+        # Interpolate the baseline
+        baseline_interp = np.interp(
+            target_indices,
+            sampled_indices,
+            df_baseline['final_baseline'].values
+        )
+        
+        # Create the result DataFrame matching the original structure
+        result_cols = {
+            "time": df_input["time"],
+            param_col_name: df_input[param_col_name].values,
+            "final_baseline": baseline_interp,
+            "super_smoothed": baseline_interp,
+        }
+        
+        # Add auxiliary columns
+        for col in ["speed", "reaper_lift_percent"]:
+            if col in df_input.columns:
+                result_cols[col] = df_input[col]
+        
+        return pd.DataFrame(result_cols)
+    
+    return df_baseline
 
 
 def load_preprocess_and_calculate_baseline(

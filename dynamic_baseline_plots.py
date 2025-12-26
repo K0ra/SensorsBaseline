@@ -1,13 +1,14 @@
+import matplotlib.pyplot as plt
 from typing import Dict, Any, Optional
 import os
-
-import matplotlib.pyplot as plt
 import pandas as pd
+import time
 
 from dynamic_baseline import (
     process_and_merge_csv_files,
     preprocess_data,
     calculate_dynamic_baseline,
+    calculate_dynamic_baseline_downsample
 )
 
 
@@ -26,12 +27,12 @@ def _calculate_baselines_for_sensors(
         strategy_params_freq = {}
 
     # Calculate baseline for value
-    value_baseline_df = calculate_dynamic_baseline(df_preprocessed,
+    value_baseline_df = calculate_dynamic_baseline_downsample(df_preprocessed,
                                                     param_col_name="value",
                                                     strategy_params=strategy_params_value)
 
     # Calculate baseline for freq
-    freq_baseline_df = calculate_dynamic_baseline(df_preprocessed,
+    freq_baseline_df = calculate_dynamic_baseline_downsample(df_preprocessed,
                                                     param_col_name="freq",
                                                     strategy_params=strategy_params_freq)
 
@@ -217,17 +218,30 @@ if __name__ == "__main__":
     }
     common_params_freq = common_params_value.copy()
 
-    # Process each subfolder under `data`
-    for name in os.listdir(data_root):
-        folder_path = os.path.join(data_root, name)
-        if not os.path.isdir(folder_path):
-            continue
+    start_time = time.time()
 
-        plot_folder_to_file(
+    plot_folder_to_file(
             base_data_dir=data_root,
-            folder_name=name,
+            folder_name="3431363532335116004a0032b",
             speed_threshold=7.0,
             strategy_params_value=common_params_value,
             strategy_params_freq=common_params_freq,
         )
+
+    print(f"Total time: {time.time() - start_time}")
+
+    # Process each subfolder under `data`
+    # for name in os.listdir(data_root):
+    #     folder_path = os.path.join(data_root, name)
+    #     print(folder_path)
+    #     if not os.path.isdir(folder_path):
+    #         continue
+
+    #     plot_folder_to_file(
+    #         base_data_dir=data_root,
+    #         folder_name=name,
+    #         speed_threshold=7.0,
+    #         strategy_params_value=common_params_value,
+    #         strategy_params_freq=common_params_freq,
+    #     )
 
