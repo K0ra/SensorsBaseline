@@ -84,6 +84,66 @@ def preprocess_data(
     return df_filtered.reset_index(drop=True)
 
 
+def adaptive_window_sizes(data_values: np.ndarray, base_window: int = 30) -> Dict[str, int]:
+    """
+    Adaptive windows based on signal characteristics.
+    Fast, does not require training.
+    
+    Parameters
+    ----------
+    data_values:
+        Array of sensor values to analyze.
+    base_window:
+        Base window size to use as a starting point. Default is 30.
+    
+    Returns
+    -------
+    Dictionary with adaptive window parameters:
+        - min_window1: Small window for local minima search
+        - min_window2: Large window for local minima search
+        - rolling_window: Window for rolling statistics
+        - const_window: Window for constant region detection
+    """
+    n = len(data_values)
+    
+    # 1. Estimate change frequency via autocorrelation
+    autocorr_lag = min(100, n // 10)
+    if autocorr_lag > 10:
+        mean_val = np.mean(data_values)
+        centered = data_values - mean_val
+        autocorr = np.correlate(centered, centered, mode='full')
+        autocorr = autocorr[autocorr.size // 2:] / autocorr[autocorr.size // 2]
+        
+        # Find lag where autocorrelation drops below 0.5
+        significant_lag = np.argmax(autocorr < 0.5)
+        if significant_lag < 5:
+            significant_lag = 5
+    else:
+        significant_lag = base_window
+    
+    # 2. Estimate volatility
+    rolling_std = np.std(data_values)
+    q75 = np.percentile(data_values, 75)
+    q25 = np.percentile(data_values, 25)
+    normalized_std = rolling_std / (q75 - q25 + 1e-10)
+    
+    # 3. Adapt windows
+    min_window = max(3, int(significant_lag * 0.3))
+    max_window = max(min_window * 2, int(significant_lag * 0.7))
+    
+    # For very smooth data, reduce windows
+    if normalized_std < 0.1:
+        min_window = max(3, min_window // 2)
+        max_window = max(min_window * 2, max_window // 2)
+    
+    return {
+        "min_window1": min_window,
+        "min_window2": max_window,
+        "rolling_window": max_window * 2,
+        "const_window": max_window * 3,
+    }
+
+
 def calculate_dynamic_baseline(
     df_input: pd.DataFrame,
     param_col_name: str,
@@ -120,6 +180,14 @@ def calculate_dynamic_baseline(
     df = df_input.copy().sort_values("time").reset_index(drop=True)
     data_values = df[param_col_name].values
     n = len(data_values)
+
+    # Add adaptive windows if requested
+    if 'adaptive_windows' in strategy_params and strategy_params['adaptive_windows']:
+        adaptive_params = adaptive_window_sizes(data_values)
+        # Update window parameters (preserve other params)
+        strategy_params = {**strategy_params, **adaptive_params}
+        # Remove the flag to avoid passing it to nested calls
+        strategy_params.pop('adaptive_windows', None)
 
     # === 1. Calculating the rolling window statistics ===
     const_window = int(strategy_params.get("const_window", 50))
@@ -219,18 +287,42 @@ def calculate_dynamic_baseline(
     plateau_mask = local_stds < rolling_std_small
     min_values[plateau_mask] = data_values[plateau_mask]
 
-    # Pre-calculate the boundaries
-    window1_half = min_window1 // 2
-    window2_half = min_window2 // 2
+    # Pre-calculate median std for normalization (used inside loop)
+    median_std = np.nanmedian(local_stds) + 1e-6
 
-    # Set boundaries where analysis is impossible
-    start_idx = max(window1_half, window2_half)
+    # Pre-calculate conservative boundaries using minimum possible window sizes
+    # (when std_norm is at maximum, windows are smallest)
+    max_std_norm = 3.0  # Maximum from clip
+    min_adaptive_window1 = max(5, int(min_window1 / max_std_norm))
+    min_adaptive_window2 = max(min_adaptive_window1, int(min_window2 / max_std_norm))
+    
+    # Set boundaries where analysis is impossible (use conservative minimum windows)
+    start_idx = max(min_adaptive_window1 // 2, min_adaptive_window2 // 2)
     end_idx = n - start_idx
 
     # Only iterate where we still need values and have full windows
     for i in range(start_idx, end_idx):
         if constant_mask[i] or plateau_mask[i]:
             continue
+
+        # Adaptive window sizing based on local std
+        # Normalize std
+        std_norm = local_stds[i] / median_std
+        
+        # Clip to reasonable range
+        std_norm = np.clip(std_norm, 0.5, 3.0)
+        
+        # Calculate adaptive window sizes (larger windows for lower std, smaller for higher std)
+        adaptive_window1 = int(min_window1 / std_norm)
+        adaptive_window2 = int(min_window2 / std_norm)
+        
+        # Ensure minimum sizes
+        adaptive_window1 = max(5, adaptive_window1)
+        adaptive_window2 = max(adaptive_window1, adaptive_window2)
+        
+        # Calculate half-windows for this point
+        window1_half = adaptive_window1 // 2
+        window2_half = adaptive_window2 // 2
 
         # Check window 1
         start1 = i - window1_half
@@ -360,6 +452,96 @@ def calculate_dynamic_baseline_downsample(
         return pd.DataFrame(result_cols)
     
     return df_baseline
+
+
+def calculate_dynamic_baseline_adaptive(
+    df_input: pd.DataFrame,
+    param_col_name: str,
+    strategy_params: Optional[Dict[str, Any]] = None,
+    adaptation_method: str = "auto",
+) -> pd.DataFrame:
+    """
+    Improved version with adaptive windows that adapt to signal characteristics.
+    
+    Parameters
+    ----------
+    df_input:
+        Input DataFrame that must contain a `time` column and the column specified
+        by `param_col_name`.
+    param_col_name:
+        Name of the sensor column to use for baseline calculation (e.g. 'value'
+        or 'freq').
+    strategy_params:
+        Dictionary with algorithm parameters.
+    adaptation_method:
+        Method for adaptation: "auto" (default) or "simple".
+        - "auto": Uses adaptive windows, with optimization for large segments
+        - "simple": Always uses simple adaptive windows
+    
+    Returns
+    -------
+    DataFrame with baseline calculated using adaptive windows per segment.
+    """
+    strategy_params = strategy_params or {}
+    df = df_input.copy().sort_values("time").reset_index(drop=True)
+    data_values = df[param_col_name].values
+    
+    # 1. Split data into segments by characteristic change points
+    # Find points of sharp changes
+    diff = np.abs(np.diff(data_values))
+    change_points = np.where(diff > np.percentile(diff, 97))[0]
+    
+    if len(change_points) < 2:
+        # Homogeneous data - use global adaptation
+        adaptive_params = adaptive_window_sizes(data_values)
+        merged_params = {**strategy_params, **adaptive_params}
+        return calculate_dynamic_baseline(df_input, param_col_name, merged_params)
+    
+    # 2. For each segment, select appropriate windows
+    results = []
+    segments = np.split(data_values, change_points)
+    
+    segment_start_idx = 0
+    for i, segment in enumerate(segments):
+        if len(segment) < 50:
+            segment_start_idx += len(segment)
+            continue
+        
+        # Select adaptation method
+        if adaptation_method == "auto":
+            if len(segment) < 1000:
+                segment_params = adaptive_window_sizes(segment)
+            else:
+                # For large segments, use adaptive windows on a sample
+                sample = segment[:500]
+                segment_params = adaptive_window_sizes(sample)
+        elif adaptation_method == "simple":
+            segment_params = adaptive_window_sizes(segment)
+        else:
+            segment_params = strategy_params.copy()
+        
+        # Merge with base strategy params
+        merged_segment_params = {**strategy_params, **segment_params}
+        
+        # 3. Process segment
+        segment_end_idx = segment_start_idx + len(segment)
+        df_segment = df.iloc[segment_start_idx:segment_end_idx].copy()
+        
+        segment_result = calculate_dynamic_baseline(
+            df_segment, param_col_name, merged_segment_params
+        )
+        results.append(segment_result)
+        
+        segment_start_idx = segment_end_idx
+    
+    # 4. Combine results
+    if not results:
+        # Fallback if no segments were processed
+        adaptive_params = adaptive_window_sizes(data_values)
+        merged_params = {**strategy_params, **adaptive_params}
+        return calculate_dynamic_baseline(df_input, param_col_name, merged_params)
+    
+    return pd.concat(results, ignore_index=True)
 
 
 def load_preprocess_and_calculate_baseline(
